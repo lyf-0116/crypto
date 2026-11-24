@@ -10,6 +10,8 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -522,6 +524,105 @@ func TestCertWithoutPrincipals(t *testing.T) {
 			t.Errorf("CheckCert with cert type %d succeeded without principals, want failure", certType)
 		}
 	}
+}
+
+var errTestStructuredPrincipal = errors.New("invalid structured principal")
+
+type testStructuredPrincipal struct {
+	Tenant   string    `json:"tenant"`
+	Name     string    `json:"name"`
+	Scope    string    `json:"scope,omitempty"`
+	IssuedAt time.Time `json:"issued_at"`
+}
+
+func normalizeTestStructuredPrincipal(raw string) (string, error) {
+	var principal testStructuredPrincipal
+	if err := json.Unmarshal([]byte(raw), &principal); err != nil {
+		return "", fmt.Errorf("%w: %v", errTestStructuredPrincipal, err)
+	}
+	if principal.Tenant == "" || principal.Name == "" || principal.IssuedAt.IsZero() {
+		return "", errTestStructuredPrincipal
+	}
+
+	principal.IssuedAt = principal.IssuedAt.UTC()
+	normalized, err := json.Marshal(principal)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", errTestStructuredPrincipal, err)
+	}
+	return string(normalized), nil
+}
+
+func TestCheckCertPrincipalNormalizer(t *testing.T) {
+	certPrincipal := `{"tenant":"acme","name":"node-7","issued_at":"2026-11-25T02:00:00Z"}`
+	equivalentPrincipal := `{"name":"node-7","issued_at":"2026-11-25T10:00:00+08:00","scope":"","tenant":"acme"}`
+
+	signedCert := func(t *testing.T, principals ...string) *Certificate {
+		t.Helper()
+		cert := &Certificate{
+			Key:             testPublicKeys["ecdsa"],
+			CertType:        UserCert,
+			ValidPrincipals: principals,
+			ValidBefore:     CertTimeInfinity,
+		}
+		if err := cert.SignCert(rand.Reader, testSigners["ecdsa"]); err != nil {
+			t.Fatalf("SignCert: %v", err)
+		}
+		return cert
+	}
+
+	t.Run("equivalent encodings match after normalization", func(t *testing.T) {
+		checker := &CertChecker{PrincipalNormalizer: normalizeTestStructuredPrincipal}
+		cert := signedCert(t, "{not-json", certPrincipal)
+
+		if err := checker.CheckCert(equivalentPrincipal, cert); err != nil {
+			t.Fatalf("CheckCert with semantically equal principal: %v", err)
+		}
+	})
+
+	t.Run("normalization errors are not mismatch errors", func(t *testing.T) {
+		checker := &CertChecker{PrincipalNormalizer: normalizeTestStructuredPrincipal}
+
+		err := checker.CheckCert("{not-json", &Certificate{
+			ValidPrincipals: []string{certPrincipal},
+		})
+		if !errors.Is(err, errTestStructuredPrincipal) {
+			t.Fatalf("CheckCert error = %v, want structured principal error", err)
+		}
+		if err != nil && strings.Contains(err.Error(), "not in the set") {
+			t.Fatalf("parse error was reported as mismatch: %v", err)
+		}
+
+		err = checker.CheckCert(equivalentPrincipal, &Certificate{
+			ValidPrincipals: []string{"{not-json"},
+		})
+		if !errors.Is(err, errTestStructuredPrincipal) {
+			t.Fatalf("CheckCert error = %v, want structured certificate principal error", err)
+		}
+		if err != nil && strings.Contains(err.Error(), "not in the set") {
+			t.Fatalf("certificate parse error was reported as mismatch: %v", err)
+		}
+	})
+
+	t.Run("different structured values still mismatch", func(t *testing.T) {
+		otherTenant := `{"tenant":"globex","name":"node-7","issued_at":"2026-11-25T02:00:00Z"}`
+		checker := &CertChecker{PrincipalNormalizer: normalizeTestStructuredPrincipal}
+
+		err := checker.CheckCert(otherTenant, &Certificate{
+			ValidPrincipals: []string{certPrincipal},
+		})
+		if err == nil || !strings.Contains(err.Error(), "not in the set") {
+			t.Fatalf("CheckCert error = %v, want principal mismatch", err)
+		}
+	})
+
+	t.Run("default comparison remains exact", func(t *testing.T) {
+		err := (&CertChecker{}).CheckCert(equivalentPrincipal, &Certificate{
+			ValidPrincipals: []string{certPrincipal},
+		})
+		if err == nil || !strings.Contains(err.Error(), "not in the set") {
+			t.Fatalf("CheckCert error = %v, want exact principal mismatch", err)
+		}
+	})
 }
 
 type legacyRSASigner struct {

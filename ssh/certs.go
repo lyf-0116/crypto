@@ -349,6 +349,18 @@ type CertChecker struct {
 	// is revoked and false otherwise. If nil, no certificates are
 	// considered to have been revoked.
 	IsRevoked func(cert *Certificate) bool
+
+	// PrincipalNormalizer optionally parses and canonicalizes principal
+	// identities before CheckCert compares the requested principal with
+	// Certificate.ValidPrincipals.
+	//
+	// SSH principals are opaque, byte-oriented strings, so the nil default
+	// preserves exact matching. Deployments that encode a structured
+	// identity in principals can use this hook to accept equivalent
+	// historical encodings. A non-nil error describes an unparseable
+	// principal and is returned separately from a principal mismatch.
+	// The returned value must be an unambiguous canonical representation.
+	PrincipalNormalizer func(principal string) (string, error)
 }
 
 // CheckHostKey checks a host key certificate. This method can be
@@ -430,7 +442,12 @@ func (c *CertChecker) CheckCert(principal string, cert *Certificate) error {
 	if principal == "" {
 		return errors.New("ssh: empty principal")
 	}
-	if !slices.Contains(cert.ValidPrincipals, principal) {
+
+	principalAllowed, err := c.principalAllowed(principal, cert)
+	if err != nil {
+		return err
+	}
+	if !principalAllowed {
 		return fmt.Errorf("ssh: principal %q not in the set of valid principals for given certificate: %q", principal, cert.ValidPrincipals)
 	}
 
@@ -461,6 +478,42 @@ func (c *CertChecker) CheckCert(principal string, cert *Certificate) error {
 	}
 
 	return nil
+}
+
+func (c *CertChecker) principalAllowed(principal string, cert *Certificate) (bool, error) {
+	wanted := principal
+	if c.PrincipalNormalizer != nil {
+		normalized, err := c.PrincipalNormalizer(principal)
+		if err != nil {
+			return false, fmt.Errorf("ssh: cannot normalize requested principal %q: %w", principal, err)
+		}
+		if normalized == "" {
+			return false, errors.New("ssh: normalized principal is empty")
+		}
+		wanted = normalized
+	}
+
+	var invalid []error
+	for _, validPrincipal := range cert.ValidPrincipals {
+		candidate := validPrincipal
+		if c.PrincipalNormalizer != nil {
+			normalized, err := c.PrincipalNormalizer(validPrincipal)
+			if err != nil {
+				invalid = append(invalid, fmt.Errorf("principal %q: %w", validPrincipal, err))
+				continue
+			}
+			candidate = normalized
+		}
+
+		if candidate == wanted {
+			return true, nil
+		}
+	}
+
+	if len(invalid) > 0 {
+		return false, fmt.Errorf("ssh: certificate contains unparseable principals: %w", errors.Join(invalid...))
+	}
+	return false, nil
 }
 
 // SignCert signs the certificate with an authority, setting the Nonce,
