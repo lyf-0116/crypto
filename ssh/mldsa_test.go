@@ -436,7 +436,7 @@ func TestMLDSACertificateAuthority(t *testing.T) {
 
 	checker := &CertChecker{IsUserAuthority: func(k PublicKey) bool {
 		return bytes.Equal(k.Marshal(), authority.PublicKey().Marshal())
-	}}
+	}, IsRevoked: InsecureIgnoreRevocation}
 	if err := checker.CheckCert("testuser", cert); err != nil {
 		t.Errorf("CheckCert: %v", err)
 	}
@@ -589,7 +589,7 @@ func TestMLDSACertificate(t *testing.T) {
 
 			checker := &CertChecker{IsUserAuthority: func(k PublicKey) bool {
 				return bytes.Equal(k.Marshal(), authority.PublicKey().Marshal())
-			}}
+			}, IsRevoked: InsecureIgnoreRevocation}
 			if err := checker.CheckCert("testuser", parsedCert); err != nil {
 				t.Errorf("CheckCert: %v", err)
 			}
@@ -653,6 +653,7 @@ func TestMLDSACertificateClientServer(t *testing.T) {
 	checker := &CertChecker{
 		IsUserAuthority: isAuthority,
 		IsHostAuthority: func(k PublicKey, addr string) bool { return isAuthority(k) },
+		IsRevoked:       InsecureIgnoreRevocation,
 	}
 	serverConf := &ServerConfig{
 		PublicKeyAuthAlgorithms: []string{algo},

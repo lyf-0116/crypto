@@ -310,7 +310,7 @@ const sourceAddressCriticalOption = "source-address"
 // CertChecker does the work of verifying a certificate. Its methods
 // can be plugged into ClientConfig.HostKeyCallback and
 // ServerConfig.PublicKeyCallback. For the CertChecker to work,
-// minimally, the IsAuthority callback should be set.
+// minimally, the IsAuthority and IsRevoked callbacks should be set.
 type CertChecker struct {
 	// SupportedCriticalOptions lists the CriticalOptions that the
 	// application layer understands. A certificate carrying a critical
@@ -346,9 +346,26 @@ type CertChecker struct {
 
 	// IsRevoked is called for each certificate so that revocation checking
 	// can be implemented. It should return true if the given certificate
-	// is revoked and false otherwise. If nil, no certificates are
-	// considered to have been revoked.
+	// is revoked and false otherwise.
+	//
+	// IsRevoked must be set: revocation is external state that a
+	// CertChecker cannot derive from the certificate itself, so a checker
+	// without a revocation source cannot safely assume that no
+	// certificate has been revoked. CheckCert, CheckHostKey and
+	// Authenticate reject every certificate when IsRevoked is nil.
+	// Deployments that have no revocation source and consciously accept
+	// the risk that revoked certificates remain accepted until they
+	// expire can set IsRevoked to InsecureIgnoreRevocation.
 	IsRevoked func(cert *Certificate) bool
+}
+
+// InsecureIgnoreRevocation is an [CertChecker.IsRevoked] implementation
+// that considers no certificate revoked. It must only be used when the
+// caller has no revocation source and explicitly accepts that revoked
+// certificates are accepted until their natural expiry, because a
+// CertChecker with a nil IsRevoked field rejects every certificate.
+func InsecureIgnoreRevocation(cert *Certificate) bool {
+	return false
 }
 
 // CheckHostKey checks a host key certificate. This method can be
@@ -417,7 +434,10 @@ func (c *CertChecker) Authenticate(conn ConnMetadata, pubKey PublicKey) (*Permis
 // SupportedCriticalOptions are rejected, as are an empty principal and a
 // certificate with an empty ValidPrincipals.
 func (c *CertChecker) CheckCert(principal string, cert *Certificate) error {
-	if c.IsRevoked != nil && c.IsRevoked(cert) {
+	if c.IsRevoked == nil {
+		return errors.New("ssh: cannot verify certificate, IsRevoked not set")
+	}
+	if c.IsRevoked(cert) {
 		return fmt.Errorf("ssh: certificate serial %d revoked", cert.Serial)
 	}
 

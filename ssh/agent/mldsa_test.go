@@ -99,7 +99,7 @@ func TestMLDSAKeys(t *testing.T) {
 
 	checker := &ssh.CertChecker{IsUserAuthority: func(k ssh.PublicKey) bool {
 		return bytes.Equal(k.Marshal(), testPublicKeys["ed25519"].Marshal())
-	}}
+	}, IsRevoked: ssh.InsecureIgnoreRevocation}
 	for _, tt := range []struct {
 		name   string
 		signer ssh.Signer

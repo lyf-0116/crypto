@@ -64,6 +64,7 @@ func TestSSHCLIAuth(t *testing.T) {
 		IsUserAuthority: func(k ssh.PublicKey) bool {
 			return bytes.Equal(k.Marshal(), testPublicKeys["ca"].Marshal())
 		},
+		IsRevoked: ssh.InsecureIgnoreRevocation,
 		UserKeyFallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			if conn.User() == "testpubkey" && bytes.Equal(key.Marshal(), testPublicKeys["rsa"].Marshal()) {
 				return nil, nil

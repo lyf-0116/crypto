@@ -145,6 +145,7 @@ func TestValidateCert(t *testing.T) {
 	checker.IsUserAuthority = func(k PublicKey) bool {
 		return bytes.Equal(k.Marshal(), validCert.SignatureKey.Marshal())
 	}
+	checker.IsRevoked = InsecureIgnoreRevocation
 
 	if err := checker.CheckCert("testcertificate", validCert); err != nil {
 		t.Errorf("Unable to validate certificate: %v", err)
@@ -157,6 +158,70 @@ func TestValidateCert(t *testing.T) {
 	}
 	if err := checker.CheckCert("testcertificate", invalidCert); err == nil {
 		t.Error("Invalid cert signature passed validation")
+	}
+}
+
+// TestCertCheckerRequiresRevocationCheck pins the fail-closed behavior of
+// CertChecker: a nil IsRevoked callback must not be treated as "no
+// certificate is revoked", because revocation is external state the
+// checker cannot derive itself. Every certificate must be rejected until
+// the caller supplies a revocation source, or explicitly opts out with
+// InsecureIgnoreRevocation.
+func TestCertCheckerRequiresRevocationCheck(t *testing.T) {
+	cert := &Certificate{
+		ValidPrincipals: []string{"user"},
+		Key:             testPublicKeys["rsa"],
+		ValidBefore:     CertTimeInfinity,
+		CertType:        UserCert,
+	}
+	if err := cert.SignCert(rand.Reader, testSigners["ecdsa"]); err != nil {
+		t.Fatalf("SignCert: %v", err)
+	}
+
+	authority := func(k PublicKey) bool {
+		return bytes.Equal(k.Marshal(), testPublicKeys["ecdsa"].Marshal())
+	}
+
+	failClosed := &CertChecker{IsUserAuthority: authority}
+	if err := failClosed.CheckCert("user", cert); err == nil {
+		t.Error("CheckCert with a nil IsRevoked succeeded, want failure")
+	}
+	if _, err := failClosed.Authenticate(testConnMeta{user: "user"}, cert); err == nil {
+		t.Error("Authenticate with a nil IsRevoked succeeded, want failure")
+	}
+
+	hostCert := &Certificate{
+		ValidPrincipals: []string{"hostname"},
+		Key:             testPublicKeys["rsa"],
+		ValidBefore:     CertTimeInfinity,
+		CertType:        HostCert,
+	}
+	if err := hostCert.SignCert(rand.Reader, testSigners["ecdsa"]); err != nil {
+		t.Fatalf("SignCert: %v", err)
+	}
+	hostChecker := &CertChecker{
+		IsHostAuthority: func(k PublicKey, addr string) bool { return authority(k) },
+	}
+	if err := hostChecker.CheckHostKey("hostname:22", nil, hostCert); err == nil {
+		t.Error("CheckHostKey with a nil IsRevoked succeeded, want failure")
+	}
+
+	// An explicit opt-out restores the "nothing is revoked" semantics.
+	optedOut := &CertChecker{
+		IsUserAuthority: authority,
+		IsRevoked:       InsecureIgnoreRevocation,
+	}
+	if err := optedOut.CheckCert("user", cert); err != nil {
+		t.Errorf("CheckCert after explicit opt-out failed: %v", err)
+	}
+
+	// A registered revocation source still rejects revoked certificates.
+	revoking := &CertChecker{
+		IsUserAuthority: authority,
+		IsRevoked:       func(*Certificate) bool { return true },
+	}
+	if err := revoking.CheckCert("user", cert); err == nil {
+		t.Error("CheckCert accepted a certificate reported as revoked")
 	}
 }
 
@@ -245,6 +310,7 @@ func TestCheckCertSKAuthorityNoUPRequired(t *testing.T) {
 			caSK := &skECDSAPublicKey{application: "ssh:", PublicKey: caKey.PublicKey}
 			return bytes.Equal(k.Marshal(), caSK.Marshal())
 		},
+		IsRevoked: InsecureIgnoreRevocation,
 	}
 
 	// Both UP=0 and UP=1 CA signatures verify: UP is not enforced
@@ -275,7 +341,8 @@ func TestValidateCertTime(t *testing.T) {
 		125: false,
 	} {
 		checker := CertChecker{
-			Clock: func() time.Time { return time.Unix(ts, 0) },
+			Clock:     func() time.Time { return time.Unix(ts, 0) },
+			IsRevoked: InsecureIgnoreRevocation,
 		}
 		checker.IsUserAuthority = func(k PublicKey) bool {
 			return bytes.Equal(k.Marshal(),
@@ -306,6 +373,7 @@ func TestHostKeyCert(t *testing.T) {
 		IsHostAuthority: func(p PublicKey, addr string) bool {
 			return addr == "hostname:22" && bytes.Equal(testPublicKeys["ecdsa"].Marshal(), p.Marshal())
 		},
+		IsRevoked: InsecureIgnoreRevocation,
 	}
 
 	certSigner, err := NewCertSigner(cert, testSigners["rsa"])
@@ -406,6 +474,7 @@ func TestCertCriticalOptions(t *testing.T) {
 		IsUserAuthority: func(p PublicKey) bool {
 			return bytes.Equal(testPublicKeys["ecdsa"].Marshal(), p.Marshal())
 		},
+		IsRevoked: InsecureIgnoreRevocation,
 	}
 
 	for _, test := range []struct {
@@ -482,6 +551,7 @@ func TestEmptyPrincipal(t *testing.T) {
 
 	checker := &CertChecker{
 		IsHostAuthority: func(p PublicKey, addr string) bool { return true },
+		IsRevoked:       InsecureIgnoreRevocation,
 	}
 	if err := checker.CheckCert("", cert); err == nil {
 		t.Error("CheckCert with an empty principal succeeded, want failure")

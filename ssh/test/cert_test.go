@@ -42,6 +42,7 @@ func TestCertLogin(t *testing.T) {
 			IsHostAuthority: func(pk ssh.PublicKey, addr string) bool {
 				return bytes.Equal(pk.Marshal(), testPublicKeys["ca"].Marshal())
 			},
+			IsRevoked: ssh.InsecureIgnoreRevocation,
 		}).CheckHostKey,
 	}
 	conf.Auth = append(conf.Auth, ssh.PublicKeys(certSigner))
