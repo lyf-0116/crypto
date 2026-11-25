@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -502,11 +503,46 @@ func (c *client) SignWithFlags(key ssh.PublicKey, data []byte, flags SignatureFl
 			return nil, err
 		}
 
+		// A compromised or malicious agent can return a signature made
+		// with a different key or algorithm than the one requested. Do not
+		// trust the response: verify the signature against the requested
+		// public key before handing it to the caller.
+		if err := key.Verify(data, &sig); err != nil {
+			return nil, fmt.Errorf("agent: signature returned by agent failed verification: %w", err)
+		}
+
+		// Check that the algorithm actually used by the agent matches the
+		// algorithm requested via the flags. The flags only constrain the
+		// RSA hash algorithm, so the check is meaningful for RSA keys.
+		//
+		// Older agents may ignore the flags and answer with the key's
+		// default algorithm. Such a signature still verifies, so during the
+		// compatibility window this mismatch is logged rather than turned
+		// into a hard error.
+		if want, ok := rsaSigAlgoForFlags(flags); ok && sig.Format != want {
+			log.Printf("agent: requested signature algorithm %q (flags %d), but agent returned %q", want, flags, sig.Format)
+		}
+
 		return &sig, nil
 	case *failureAgentMsg:
 		return nil, errors.New("agent: failed to sign challenge")
 	default:
 		return nil, fmt.Errorf("agent: failed to sign challenge, unexpected message type %T", msg)
+	}
+}
+
+// rsaSigAlgoForFlags maps the RSA signature flags defined in
+// [PROTOCOL.agent] section 5.3 to the corresponding signature algorithm
+// name. The second return value reports whether flags request a specific
+// RSA hash algorithm.
+func rsaSigAlgoForFlags(flags SignatureFlags) (string, bool) {
+	switch flags {
+	case SignatureFlagRsaSha256:
+		return ssh.KeyAlgoRSASHA256, true
+	case SignatureFlagRsaSha512:
+		return ssh.KeyAlgoRSASHA512, true
+	default:
+		return "", false
 	}
 }
 

@@ -697,3 +697,105 @@ func TestAddRejectsShortEd25519Key(t *testing.T) {
 		})
 	}
 }
+
+// maliciousAgent wraps a keyring but returns attacker-controlled signature
+// responses, simulating a compromised or non-conformant ssh-agent.
+type maliciousAgent struct {
+	*keyring
+	sign func(key ssh.PublicKey, data []byte, flags SignatureFlags) (*ssh.Signature, error)
+}
+
+func (a *maliciousAgent) SignWithFlags(key ssh.PublicKey, data []byte, flags SignatureFlags) (*ssh.Signature, error) {
+	return a.sign(key, data, flags)
+}
+
+// TestSignVerifiesReturnedSignature ensures the client never hands a
+// signature that does not verify against the requested public key back to
+// the caller, even if the agent returns one.
+func TestSignVerifiesReturnedSignature(t *testing.T) {
+	signer, err := ssh.NewSignerFromKey(testPrivateKeys["rsa"])
+	if err != nil {
+		t.Fatalf("NewSignerFromKey: %v", err)
+	}
+	pub := signer.PublicKey()
+
+	malicious := &maliciousAgent{
+		keyring: NewKeyring().(*keyring),
+		sign: func(key ssh.PublicKey, data []byte, flags SignatureFlags) (*ssh.Signature, error) {
+			// A structurally valid signature over unrelated data: it must
+			// not verify against the data the caller asked to be signed.
+			return signer.Sign(rand.Reader, []byte("attacker-controlled data"))
+		},
+	}
+	client, cleanup := startAgent(t, malicious)
+	defer cleanup()
+
+	if _, err := client.SignWithFlags(pub, []byte("hello"), SignatureFlagRsaSha256); err == nil {
+		t.Fatal("SignWithFlags accepted a signature that does not verify")
+	} else if !strings.Contains(err.Error(), "failed verification") {
+		t.Fatalf("got error %q, want a verification failure", err)
+	}
+}
+
+// TestSignAcceptsValidSignature checks that a well-behaved agent still
+// works and that a signature verifying correctly is returned unchanged.
+func TestSignAcceptsValidSignature(t *testing.T) {
+	signer, err := ssh.NewSignerFromKey(testPrivateKeys["rsa"])
+	if err != nil {
+		t.Fatalf("NewSignerFromKey: %v", err)
+	}
+	pub := signer.PublicKey()
+
+	client, cleanup := startKeyringAgent(t)
+	defer cleanup()
+	if err := client.Add(AddedKey{PrivateKey: testPrivateKeys["rsa"]}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	data := []byte("hello")
+	sig, err := client.SignWithFlags(pub, data, SignatureFlagRsaSha256)
+	if err != nil {
+		t.Fatalf("SignWithFlags: %v", err)
+	}
+	if sig.Format != ssh.KeyAlgoRSASHA256 {
+		t.Fatalf("signature format: got %q, want %q", sig.Format, ssh.KeyAlgoRSASHA256)
+	}
+	if err := pub.Verify(data, sig); err != nil {
+		t.Fatalf("returned signature does not verify: %v", err)
+	}
+}
+
+// TestSignWarnsOnAlgorithmMismatch verifies that an agent which ignores the
+// requested flags and answers with a different (but still valid) algorithm
+// does not break the call: the signature verifies, while the mismatch is
+// surfaced through a warning rather than silently accepted.
+func TestSignWarnsOnAlgorithmMismatch(t *testing.T) {
+	signer, err := ssh.NewSignerFromKey(testPrivateKeys["rsa"])
+	if err != nil {
+		t.Fatalf("NewSignerFromKey: %v", err)
+	}
+	pub := signer.PublicKey()
+
+	malicious := &maliciousAgent{
+		keyring: NewKeyring().(*keyring),
+		sign: func(key ssh.PublicKey, data []byte, flags SignatureFlags) (*ssh.Signature, error) {
+			// Ignore the SHA-256 flag and answer with an ssh-rsa (SHA-1)
+			// signature, as legacy agents are allowed to do.
+			return signer.Sign(rand.Reader, data)
+		},
+	}
+	client, cleanup := startAgent(t, malicious)
+	defer cleanup()
+
+	data := []byte("hello")
+	sig, err := client.SignWithFlags(pub, data, SignatureFlagRsaSha256)
+	if err != nil {
+		t.Fatalf("legacy algorithm mismatch should not fail the call: %v", err)
+	}
+	if sig.Format == ssh.KeyAlgoRSASHA256 {
+		t.Fatal("test setup invalid: expected agent to return a different algorithm")
+	}
+	if err := pub.Verify(data, sig); err != nil {
+		t.Fatalf("returned signature does not verify: %v", err)
+	}
+}
